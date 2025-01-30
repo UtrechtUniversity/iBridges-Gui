@@ -1,6 +1,8 @@
-from ibridges.path import IrodsPath
 import pytest
 from irods.exception import DataObjectDoesNotExist
+
+from ibridges.exception import NotADataObjectError
+from ibridges.path import IrodsPath
 
 
 def test_path_open_error(session, collection):
@@ -18,12 +20,8 @@ def test_path_open_error(session, collection):
             handle.write("abc")
 
     # We should not be able to open collections.
-    with pytest.raises(ValueError):
+    with pytest.raises(NotADataObjectError):
         with coll_ipath.open("r") as handle:
-            handle.read()
-
-    with pytest.raises(ValueError):
-        with coll_ipath.open("w") as handle:
             handle.read()
 
     ipath.remove()

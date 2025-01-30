@@ -16,6 +16,12 @@ import irods.collection
 import irods.data_object
 import irods.exception
 
+from ibridges.exception import (
+    CollectionDoesNotExistError,
+    DataObjectExistsError,
+    DoesNotExistError,
+    NotACollectionError,
+)
 from ibridges.executor import Operations
 from ibridges.path import CachedIrodsPath, IrodsPath
 from ibridges.session import Session
@@ -72,8 +78,10 @@ def upload(
 
     Raises
     ------
-    ValueError:
+    FileNotFoundError:
         If the local_path is not a valid filename of directory.
+    DataObjectExistsError:
+        If the data object to be uploaded already exists without using overwrite==True.
     PermissionError:
         If the iRODS server does not allow the collection or data object to be created.
 
@@ -98,7 +106,7 @@ def upload(
     if local_path.is_dir():
         idest_path = ipath / local_path.name
         if not overwrite and idest_path.dataobject_exists():
-            raise FileExistsError(f"Data object {idest_path} already exists.")
+            raise DataObjectExistsError(f"Data object {idest_path} already exists.")
         ops = _up_sync_operations(
             local_path, idest_path, copy_empty_folders=copy_empty_folders, depth=None,
             overwrite=overwrite, ignore_err=ignore_err
@@ -115,7 +123,7 @@ def upload(
 
     elif local_path.is_symlink():
         raise FileNotFoundError(
-            f"Cannot upload symbolic link {local_path}, please supply a direct " "path."
+            f"Cannot upload symbolic link {local_path}, please supply a direct path."
         )
     else:
         raise FileNotFoundError(f"Cannot upload {local_path}: file or directory does not exist.")
@@ -181,7 +189,7 @@ def download(
     PermissionError:
         If the iRODS server (for whatever reason) forbids downloading the file or
         (part of the) collection.
-    ValueError:
+    DoesNotExistError:
         If the irods_path is not pointing to either a collection or a data object.
     FileExistsError:
         If the irods_path points to a data object and the local file already exists.
@@ -230,7 +238,7 @@ def download(
             ops.add_meta_download(irods_path, irods_path, metadata)
 
     else:
-        raise ValueError(f"Data object or collection not found: '{irods_path}'")
+        raise DoesNotExistError(f"Data object or collection not found: '{irods_path}'")
 
     ops.resc_name = resc_name
     ops.options = options
@@ -323,6 +331,14 @@ def sync(
     kwargs:
         Extra arguments for executing the sync operation, e.g. progress_bar = False.
 
+    Raises
+    ------
+    CollectionDoesNotExistError:
+        If the source collection does not exist
+    NotACollectionError:
+        If the source is a data object.
+    NotADirectoryError:
+        If the local source is not a directory.
 
     Returns
     -------
@@ -341,10 +357,15 @@ def sync(
 
     if isinstance(source, IrodsPath):
         if not source.collection_exists():
-            raise ValueError(f"Source collection '{source.absolute()}' does not exist")
+            if source.dataobject_exists():
+                raise NotACollectionError(f"Source '{source.absolute()}' is a data object, "
+                                     "can only sync collections.")
+            raise CollectionDoesNotExistError(
+                f"Source collection '{source.absolute()}' does not exist")
     else:
         if not Path(source).is_dir():
-            raise ValueError(f"Source folder '{source}' does not exist")
+            raise NotADirectoryError(f"Source folder '{source}' is not a directory or "
+                                     "does not exist.")
 
     if isinstance(source, IrodsPath):
         ops = _down_sync_operations(
@@ -391,8 +412,10 @@ def create_meta_archive(session: Session, source: Union[str, IrodsPath],
 
     Raises
     ------
-    ValueError
-        If the source is not a collection.
+    CollectionDoesNotExistError:
+        If the source collection does not exist.
+    NotACollectionError:
+        If the source is not a collection but a data object.
 
     Examples
     --------
@@ -401,8 +424,11 @@ def create_meta_archive(session: Session, source: Union[str, IrodsPath],
     """
     root_ipath = IrodsPath(session, source)
     if not root_ipath.collection_exists():
-        raise ValueError("Cannot download metadata archive, no collection present at "
-                         f"'{root_ipath}'.")
+        if root_ipath.dataobject_exists():
+            raise NotACollectionError("Cannot download metadata archive: "
+                                 f"'{root_ipath}' is a data object, need a collection.")
+        raise CollectionDoesNotExistError("Cannot download metadata archive: "
+                                    f"'{root_ipath}' does not exist.")
     operations = Operations()
     for ipath in root_ipath.walk():
         operations.add_meta_download(root_ipath, ipath, meta_fp)
@@ -437,8 +463,10 @@ def apply_meta_archive(session, meta_fp: Union[str, Path], ipath: Union[str, Iro
 
     Raises
     ------
-    ValueError
-        If the ipath is not an iRODS collection.
+    CollectionDoesNotExistError:
+        If the ipath does not exist.
+    NotACollectionError:
+        If the ipath is not a collection.
 
     Examples
     --------
@@ -447,8 +475,11 @@ def apply_meta_archive(session, meta_fp: Union[str, Path], ipath: Union[str, Iro
     """
     ipath = IrodsPath(session, ipath)
     if not ipath.collection_exists():
-        raise ValueError("Cannot apply metadata archive, since there is no collection"
-                         f" present at '{ipath}")
+        if ipath.dataobject_exists():
+            raise NotACollectionError(f"Cannot apply metadata archive, since '{ipath}' "
+                                     "is a data object and not a collection.")
+        raise CollectionDoesNotExistError(
+            f"Cannot apply metadata archive, '{ipath}' does not exist.")
     operations = Operations()
     operations.add_meta_upload(ipath, meta_fp)
     if not dry_run:
@@ -464,13 +495,23 @@ def _param_checks(source, target):
         raise TypeError("iRODS to iRODS copying is not supported.")
 
 
-def _transfer_needed(ipath, lpath, overwrite, ignore_err):
+def _transfer_needed(source, dest, overwrite, ignore_err):
+    if isinstance(source, IrodsPath):
+        ipath = source
+        lpath = dest
+    else:
+        ipath = dest
+        lpath = source
+
     if not overwrite:
         if not ignore_err:
-            raise FileExistsError(
-                f"Cannot overwrite {ipath} <-> {lpath} unless overwrite==True. "
-                f"To ignore this error and skip the files use ignore_err==True.")
-        warnings.warn(f"Skipping file/data object {ipath} <-> {lpath} since "
+            err_msg = (f"Cannot overwrite {source} -> {dest} unless overwrite==True. "
+                       f"To ignore this error and skip the files use ignore_err==True.")
+            if isinstance(dest, IrodsPath):
+                raise DataObjectExistsError(err_msg)
+            else:
+                raise FileExistsError(err_msg)
+        warnings.warn(f"Skipping file/data object {source} -> {dest} since "
                       f"both exist and overwrite == False.")
         return False
     if checksums_equal(ipath, lpath):
