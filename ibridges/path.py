@@ -91,13 +91,25 @@ class IrodsPath:
         # absolute path
         if len(self._path.parts) == 0:
             return IrodsPath(self.session, self.session.home)
-        if self._path.parts[0] == "~" or self._path.parts[0] == ".":
+        if self._path.parts[0] == "~":
             begin, end = self.session.home, self._path.parts[1:]
+        elif self._path.parts[0] == ".":
+            begin, end = self.session.cwd, self._path.parts[1:]
         elif self._path.parts[0] == "/":
             begin, end = "/", self._path.parts[1:]
         else:
-            begin, end = self.session.home, self._path.parts
-        abs_str = str(PurePosixPath(begin, *end))
+            begin, end = self.session.cwd, self._path.parts
+
+        all_parts = PurePosixPath(begin, *end).parts
+        new_parts = []
+        for part in all_parts:
+            if part == "..":
+                if len(new_parts) == 0:
+                    raise ValueError(f"Cannot create path with {self._parts} too many '..'.")
+                new_parts.pop()
+            else:
+                new_parts.append(part)
+        abs_str = str(PurePosixPath(*new_parts))
         return IrodsPath(self.session, abs_str)
 
     def __str__(self) -> str:
