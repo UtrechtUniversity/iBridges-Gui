@@ -75,6 +75,7 @@ class Session:
         irods_env: Union[dict, str, Path],
         password: Optional[str] = None,
         irods_home: Optional[str] = None,
+        cwd: Optional[str] = None,
     ):
         """Authenticate and connect to the iRODS server."""
         irods_env_path = None
@@ -102,6 +103,11 @@ class Session:
             self.home = irods_home
         if "irods_home" not in self._irods_env:
             self.home = "/" + self.zone + "/home/" + self.username
+
+        if cwd is not None:
+            self.cwd = cwd
+        else:
+            self.cwd = self.home
 
     def __enter__(self):
         """Connect to the iRODS server if not already connected."""
